@@ -26,10 +26,10 @@ namespace sqlite {
 				case std::codecvt_base::noconv:
 					// This should be unreachable
 				case std::codecvt_base::error:
-					throw errors::invalid_utf16("Invalid UTF-16 input", "");
+					throw errors::invalid_utf16("Invalid UTF-16 input", "", "<unknown>");
 				case std::codecvt_base::partial:
 					if(used_output == result.data() + produced_output)
-						throw errors::invalid_utf16("Unexpected end of input", "");
+						throw errors::invalid_utf16("Unexpected end of input", "", "<unknown>");
 					produced_output = used_output - result.data();
 					result.resize(
 							result.size()

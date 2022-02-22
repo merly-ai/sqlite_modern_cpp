@@ -96,6 +96,7 @@ namespace sqlite {
 
 		database_binder(database_binder&& other) :
 			_db(std::move(other._db)),
+			_db_name(other._db_name),
 			_stmt(std::move(other._stmt)),
 			_inx(other._inx), execution_started(other.execution_started) { }
 
@@ -106,7 +107,7 @@ namespace sqlite {
 			while((hresult = sqlite3_step(_stmt.get())) == SQLITE_ROW) {}
 
 			if(hresult != SQLITE_DONE) {
-				errors::throw_sqlite_error(hresult, sql());
+				errors::throw_sqlite_error(hresult, sql(), _db_name);
 			}
 		}
 		
@@ -136,6 +137,7 @@ namespace sqlite {
 
 	private:
 		std::shared_ptr<sqlite3> _db;
+		std::string _db_name;
 		std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> _stmt;
 		utility::UncaughtExceptionDetector _has_uncaught_exception;
 
@@ -165,7 +167,7 @@ namespace sqlite {
 			}
 
 			if(hresult != SQLITE_DONE) {
-				errors::throw_sqlite_error(hresult, sql());
+				errors::throw_sqlite_error(hresult, sql(), _db_name);
 			}
 		}
 
@@ -176,15 +178,15 @@ namespace sqlite {
 			if((hresult = sqlite3_step(_stmt.get())) == SQLITE_ROW) {
 				call_back();
 			} else if(hresult == SQLITE_DONE) {
-				throw errors::no_rows("no rows to extract: exactly 1 row expected", sql(), SQLITE_DONE);
+				throw errors::no_rows("no rows to extract: exactly 1 row expected", sql(), _db_name, SQLITE_DONE);
 			}
 
 			if((hresult = sqlite3_step(_stmt.get())) == SQLITE_ROW) {
-				throw errors::more_rows("not all rows extracted", sql(), SQLITE_ROW);
+				throw errors::more_rows("not all rows extracted", sql(), _db_name, SQLITE_ROW);
 			}
 
 			if(hresult != SQLITE_DONE) {
-				errors::throw_sqlite_error(hresult, sql());
+				errors::throw_sqlite_error(hresult, sql(), _db_name);
 			}
 		}
 
@@ -197,9 +199,9 @@ namespace sqlite {
 			sqlite3_stmt* tmp = nullptr;
 			const char *remaining;
 			hresult = sqlite3_prepare_v2(_db.get(), sql.data(), -1, &tmp, &remaining);
-			if(hresult != SQLITE_OK) errors::throw_sqlite_error(hresult, sql);
+			if(hresult != SQLITE_OK) errors::throw_sqlite_error(hresult, sql, _db_name);
 			if(!std::all_of(remaining, sql.data() + sql.size(), [](char ch) {return std::isspace(ch);}))
-				throw errors::more_statements("Multiple semicolon separated statements are unsupported", sql);
+				throw errors::more_statements("Multiple semicolon separated statements are unsupported", sql, _db_name);
 			return tmp;
 		}
 
@@ -267,14 +269,16 @@ namespace sqlite {
 
 	public:
 
-		database_binder(std::shared_ptr<sqlite3> db, std::u16string const & sql):
+		database_binder(std::shared_ptr<sqlite3> db, std::u16string const & sql, std::string const& db_name):
 			_db(db),
+			_db_name(db_name),
 			_stmt(_prepare(sql), sqlite3_finalize),
 			_inx(0) {
 		}
 
-		database_binder(std::shared_ptr<sqlite3> db, std::string const & sql):
+		database_binder(std::shared_ptr<sqlite3> db, std::string const & sql, std::string const& db_name):
 			_db(db),
+			_db_name(db_name),
 			_stmt(_prepare(sql), sqlite3_finalize),
 			_inx(0) {
 		}
@@ -407,34 +411,35 @@ namespace sqlite {
 	class database {
 	protected:
 		std::shared_ptr<sqlite3> _db;
+		std::string _db_name;
 
 	public:
-		database(const std::string &db_name, const sqlite_config &config = {}): _db(nullptr) {
+		database(const std::string &db_name, const sqlite_config &config = {}): _db(nullptr), _db_name(db_name) {
 			sqlite3* tmp = nullptr;
 			auto ret = sqlite3_open_v2(db_name.data(), &tmp, static_cast<int>(config.flags), config.zVfs);
 			_db = std::shared_ptr<sqlite3>(tmp, [=](sqlite3* ptr) { sqlite3_close_v2(ptr); }); // this will close the connection eventually when no longer needed.
-			if(ret != SQLITE_OK) errors::throw_sqlite_error(_db ? sqlite3_extended_errcode(_db.get()) : ret);
+			if(ret != SQLITE_OK) errors::throw_sqlite_error(_db ? sqlite3_extended_errcode(_db.get()) : ret, _db_name);
 			sqlite3_extended_result_codes(_db.get(), true);
 			if(config.encoding == Encoding::UTF16)
 				*this << R"(PRAGMA encoding = "UTF-16";)";
 		}
 
-		database(const std::u16string &db_name, const sqlite_config &config = {}): _db(nullptr) {
+		database(const std::u16string &db_name, const sqlite_config &config = {}): _db(nullptr), _db_name(utility::utf16_to_utf8(db_name)) {
 			auto db_name_utf8 = utility::utf16_to_utf8(db_name);
 			sqlite3* tmp = nullptr;
 			auto ret = sqlite3_open_v2(db_name_utf8.data(), &tmp, static_cast<int>(config.flags), config.zVfs);
 			_db = std::shared_ptr<sqlite3>(tmp, [=](sqlite3* ptr) { sqlite3_close_v2(ptr); }); // this will close the connection eventually when no longer needed.
-			if(ret != SQLITE_OK) errors::throw_sqlite_error(_db ? sqlite3_extended_errcode(_db.get()) : ret);
+			if(ret != SQLITE_OK) errors::throw_sqlite_error(_db ? sqlite3_extended_errcode(_db.get()) : ret, _db_name);
 			sqlite3_extended_result_codes(_db.get(), true);
 			if(config.encoding != Encoding::UTF8)
 				*this << R"(PRAGMA encoding = "UTF-16";)";
 		}
 
-		database(std::shared_ptr<sqlite3> db):
-			_db(db) {}
+		//database(std::shared_ptr<sqlite3> db):
+		//	_db(db) {}
 
 		database_binder operator<<(const std::string& sql) {
-			return database_binder(_db, sql);
+			return database_binder(_db, sql, _db_name);
 		}
 
 		database_binder operator<<(const char* sql) {
@@ -442,14 +447,14 @@ namespace sqlite {
 		}
 
 		database_binder operator<<(const std::u16string& sql) {
-			return database_binder(_db, sql);
+			return database_binder(_db, sql, _db_name);
 		}
 
 		database_binder operator<<(const char16_t* sql) {
 			return *this << std::u16string(sql);
 		}
 
-		connection_type connection() const { return _db; }
+		connection_type& connection() { return _db; }
 
 		sqlite3_int64 last_insert_rowid() const {
 			return sqlite3_last_insert_rowid(_db.get());
@@ -466,7 +471,7 @@ namespace sqlite {
 					nullptr, nullptr, [](void* ptr){
 				delete static_cast<decltype(funcPtr)>(ptr);
 			}))
-				errors::throw_sqlite_error(result);
+				errors::throw_sqlite_error(result, "", _db_name);
 		}
 
 		template <typename StepFunction, typename FinalFunction>
@@ -482,7 +487,7 @@ namespace sqlite {
 					[](void* ptr){
 				delete static_cast<decltype(funcPtr)>(ptr);
 			}))
-				errors::throw_sqlite_error(result);
+				errors::throw_sqlite_error(result, "", _db_name);
 		}
 
 	};
@@ -539,7 +544,7 @@ namespace sqlite {
 	 inline database_binder& operator<<(database_binder& db, const int& val) {
 		int hresult;
 		if((hresult = sqlite3_bind_int(db._stmt.get(), db._next_index(), val)) != SQLITE_OK) {
-			errors::throw_sqlite_error(hresult, db.sql());
+			errors::throw_sqlite_error(hresult, db.sql(), db._db_name);
 		}
 		return db;
 	}
@@ -565,7 +570,7 @@ namespace sqlite {
 	 inline database_binder& operator <<(database_binder& db, const sqlite_int64&  val) {
 		int hresult;
 		if((hresult = sqlite3_bind_int64(db._stmt.get(), db._next_index(), val)) != SQLITE_OK) {
-			errors::throw_sqlite_error(hresult, db.sql());
+			errors::throw_sqlite_error(hresult, db.sql(), db._db_name);
 		}
 
 		return db;
@@ -592,7 +597,7 @@ namespace sqlite {
 	 inline database_binder& operator <<(database_binder& db, const float& val) {
 		int hresult;
 		if((hresult = sqlite3_bind_double(db._stmt.get(), db._next_index(), double(val))) != SQLITE_OK) {
-			errors::throw_sqlite_error(hresult, db.sql());
+			errors::throw_sqlite_error(hresult, db.sql(), db._db_name);
 		}
 
 		return db;
@@ -619,7 +624,7 @@ namespace sqlite {
 	 inline database_binder& operator <<(database_binder& db, const double& val) {
 		int hresult;
 		if((hresult = sqlite3_bind_double(db._stmt.get(), db._next_index(), val)) != SQLITE_OK) {
-			errors::throw_sqlite_error(hresult, db.sql());
+			errors::throw_sqlite_error(hresult, db.sql(), db._db_name);
 		}
 
 		return db;
@@ -648,7 +653,7 @@ namespace sqlite {
 		int bytes = vec.size() * sizeof(T);
 		int hresult;
 		if((hresult = sqlite3_bind_blob(db._stmt.get(), db._next_index(), buf, bytes, SQLITE_TRANSIENT)) != SQLITE_OK) {
-			errors::throw_sqlite_error(hresult, db.sql());
+			errors::throw_sqlite_error(hresult, db.sql(), db._db_name);
 		}
 		return db;
 	}
@@ -680,7 +685,7 @@ namespace sqlite {
 	inline database_binder& operator <<(database_binder& db, std::nullptr_t) {
 		int hresult;
 		if((hresult = sqlite3_bind_null(db._stmt.get(), db._next_index())) != SQLITE_OK) {
-			errors::throw_sqlite_error(hresult, db.sql());
+			errors::throw_sqlite_error(hresult, db.sql(), db._db_name);
 		}
 		return db;
 	}
@@ -741,7 +746,7 @@ namespace sqlite {
 	 inline database_binder& operator <<(database_binder& db, const std::string& txt) {
 		int hresult;
 		if((hresult = sqlite3_bind_text(db._stmt.get(), db._next_index(), txt.data(), -1, SQLITE_TRANSIENT)) != SQLITE_OK) {
-			errors::throw_sqlite_error(hresult, db.sql());
+			errors::throw_sqlite_error(hresult, db.sql(), db._db_name);
 		}
 
 		return db;
@@ -771,7 +776,7 @@ namespace sqlite {
 	 inline database_binder& operator <<(database_binder& db, const std::u16string& txt) {
 		int hresult;
 		if((hresult = sqlite3_bind_text16(db._stmt.get(), db._next_index(), txt.data(), -1, SQLITE_TRANSIENT)) != SQLITE_OK) {
-			errors::throw_sqlite_error(hresult, db.sql());
+			errors::throw_sqlite_error(hresult, db.sql(), db._db_name);
 		}
 
 		return db;
